@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+from datetime import datetime, timezone
 
 from twod_fim_jobs.jobs import WORKFLOWS
 
@@ -33,14 +34,29 @@ def build_parser() -> argparse.ArgumentParser:
         "payload",
         help=(
             "JSON payload containing workflow inputs. "
-            'Example: \'{"reach_id":123,"db_uri":"sqlite:////tmp/db.gpkg"}\''
+            'Example: \'{"reach_id":"123","db_uri":"sqlite:////tmp/db.gpkg"}\''
         ),
     )
     return parser
 
 
+class _JsonLinesFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return json.dumps(
+            {
+                "level": record.levelname,
+                "msg": record.getMessage(),
+                "time": datetime.fromtimestamp(
+                    record.created, tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+
+
 def _configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    handler = logging.StreamHandler()
+    handler.setFormatter(_JsonLinesFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     for name in _QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 

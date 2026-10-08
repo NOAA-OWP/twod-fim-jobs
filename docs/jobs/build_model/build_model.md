@@ -1,0 +1,108 @@
+# build_model job
+
+## Overview
+
+Initialize a model for a single reach by generating the terrain, roughness, geometry, and boundary-condition artifacts required by downstream workflow steps.
+
+## Inputs
+
+<!-- AUTO:inputs_table -->
+### Required
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `reach_id` | `string` | Primary key for the reach in the reach network |
+| `reach_network_path` | `string` | Path to the reach network GeoParquet, sorted by reach_id |
+| `base_output_path` | `string` | Path where output artifacts will be written |
+
+### Optional
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream_reach_ids` | `list[string]` |  | Ids of the reaches draining into this one |
+| `upstream_mainstem_reach_id` | `string` | null | Upstream reach with the largest drainage area; null for a headwater |
+| `dem_source` | `string` | "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/USGS_Seamless_DEM_13.vrt" | Connection string for the DEM dataset |
+| `lulc_source` | `string` | "/vsis3/usgs-landcover/annual-nlcd/c1/v0/cu/mosaic/Annual_NLCD_LndCov_2023_CU_C1V0.tif" | Connection string for the LULC source dataset |
+| `other_geometries` | `list[string]` |  | A list of geometries that will be included when making the model domain bounding box. Could be a WKT string or the path to a geojson. |
+| `domain` | `list[any]` | null | Authored model domain bbox [xmin, ymin, xmax, ymax] in epsg_code CRS units. When given it is used exactly as the domain bbox, with no buffering and no snapping, so every value must be a multiple of grid_resolution or the inputs are rejected; other_geometries, domain_buffer and centerline_buffer_bankfull_multiplier then do not affect the domain. When omitted the domain is computed. |
+| `domain_buffer` | `number` | 0.0 | An additional buffer for the model domain. Since the reach centerline will already be buffered by 10x bankfull width to generate the domain, 0 is typically appropriate. |
+| `grid_resolution` | `number` | 10 | Resolution that grid will snap to and that DEM and roughness will resample to |
+| `walk_us_dist_pct` | `number` | 0.1 | How far to walk up the upstream mainstem centerline to place the inflow boundary condition, as percent of upstream centerline length |
+| `ds_of_lake` | `boolean` | false | Whether this reach is downstream of a lake/waterbody/reservoir.  If so, inflow line is placed walk_us_dist_pct downstream of the reach end instead of upstream. |
+| `epsg_code` | `integer` | 5070 | EPSG integer for all georeferenced output artifacts |
+| `bankfull_width_multiplier` | `number` | 1.0 | How much to multiply bankfull width to arrive at inflow line width |
+| `lulc_lookup` | `dict[str, number] | string` | {"11": 0.04, "21": 0.04, "22": 0.1, "23": 0.08, "24": 0.15, "31": 0.025, "41": 0.16, "42": 0.16, "43": 0.16, "52": 0.1, "71": 0.035, "81": 0.03, "82": 0.035, "90": 0.12, "95": 0.07} | A dictionary mapping land use codes to Manning's roughness values or the path to a json dict with that mapping. |
+| `centerline_buffer_bankfull_multiplier` | `number` | 15 | This value is multiplied by the reach bankfull width to obtain the centerline buffer distance.  The buffered centerline becomes one of the geometries in the total bounds calculation that determines domain. |
+<!-- /AUTO:inputs_table -->
+
+## Processing Scope
+
+- Read this reach's geometry, and the upstream reaches, from the reach network GeoParquet.
+- Fetch both by `reach_id`, which the file is sorted by: the reader skips to the row group whose recorded min/max covers the id instead of scanning full netwrok.
+- Take `upstream_reach_ids` and `upstream_mainstem_reach_id` from the caller. Finding them through this file means looking by `reach_to_id`, which the file is not indexed by.
+- Estimate bankfull width.
+- Generate inflow geometry.
+- Define the model domain.
+- Acquire and clip DEM and land cover data.
+- Convert land cover data to roughness values.
+- Generate model metadata.
+- Write model artifacts to storage.
+
+## Artifacts
+
+<!-- AUTO:artifacts_table -->
+| Name | Description |
+| --- | --- |
+| `terrain` | Terrain raster used by the hydraulic model. |
+| `roughness` | Manning's n raster used by the hydraulic model. |
+| `centerline` | River centerline for this model's reach. |
+| `inflow_line` | Inflow boundary condition line for this model's reach. |
+| `reach_centroid` | Centroid of the river centerline for this model's reach. |
+| `domain` | Derived polygon of the full model domain. |
+<!-- /AUTO:artifacts_table -->
+
+## Response
+
+<!-- AUTO:result_table -->
+| Name | Type | Description |
+| --- | --- | --- |
+| `identity_hash` | `string` | Hash of the model identity inputs (methodology, sources, params). Used for grouping, rollback, and path addressing. |
+| `model_id` | `string` | Full model identifier: identity_hash + domain_code. Locates the model within the storage layout. |
+| `model_dir` | `string` | Content-addressed path where model artifacts were written. |
+| `warnings` | `list[JobWarning]` | Non-fatal warnings raised during the job. |
+<!-- /AUTO:result_table -->
+
+## Out of Scope
+
+- Model expansion.
+- Scenario generation.
+- Solver input generation.
+- Hydraulic simulation.
+- Post-processing.
+- Anything with STLs
+
+## Dependencies
+
+- Python
+- GDAL
+- AWS CLI
+
+## Errors
+
+- Source raster datasets are unavailable - raises DatasetUnavailableError
+- Raster processing fails - raises RasterProcessingError
+- Output artifacts cannot be written - raises WriteFailureError
+- Drainage area missing or invalid in the reach network - raises InvalidAttributeError
+
+## Checks
+
+- check if model exists at output path - return immediately with warning that model already exists
+- checks if inflow line only crosses reach at one point - if multiple crosses, complete job as normal and return warning
+- check if model domain is large - if large, return warning
+- check if all roughness values are similar - if very similar, return warning
+
+## Performance
+
+- Typical runtime: ~10 seconds per reach.
+
+Given the short execution time, AWS batch overhead would drastically increase cost.  Run this locally instead.
